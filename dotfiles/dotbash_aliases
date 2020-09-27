@@ -1,0 +1,130 @@
+alias own='sudo chown -R $USER'
+alias gpgkey='gpg --armor --export simon.bordeyne@gmail.com'
+alias unixle="sed -e 's/\r//g' "
+alias jobs='jobs -l'
+
+countdown()
+{
+    IFS=:
+    set -- $*
+    secs=$(( ${1#0} * 3600 + ${2#0} * 60 + ${3#0} ))
+    while [ $secs -gt 0 ]
+        do
+            sleep 1 &
+            printf "\r%02d:%02d:%02d" $((secs/3600)) $(( (secs/60)%60)) $((secs%60))
+            secs=$(( $secs - 1 ))
+            wait
+        done
+    echo
+}
+
+# Firefox aliases
+alias ff='firefox -no-remote &'
+
+# Python aliases
+alias py='ipython3'
+alias py3='py'
+alias py2='ipython'
+alias pip2='pip'
+alias pip='pip3'
+alias pip3up="pip3 freeze --local |sed -rn 's/^([^=# \t\\][^ \t=]*)=.*/echo; echo Processing \1 ...; pip3 install -U \1/p' |sh"
+alias pip2up="pip2 freeze --local |sed -rn 's/^([^=# \t\\][^ \t=]*)=.*/echo; echo Processing \1 ...; pip2 install -U \1/p' |sh"
+
+# ls aliases
+alias l='ls -CF'
+alias ll='ls -l'
+alias la='ls -A'
+alias lla='ls -lA'
+
+# VS Code aliases
+alias cb='code ~/.bashrc'
+alias cba='code ~/.bash_aliases'
+alias cbv='code ~/.bash_variables'
+alias cbc='code ~/.bash_completions'
+alias cgc='code ~/.gitconfig'
+alias cv='code ~/.vim/vimrc'
+alias cmutt='code ~/.muttrc'
+
+# Vim aliases
+alias vb='vim ~/.bashrc'
+alias vba='vim ~/.bash_aliases'
+alias vbv='vim ~/.bash_variables'
+alias vbc='vim ~/.bash_completions'
+alias vgc='vim ~/.gitconfig'
+alias vv='vim ~/.vim/vimrc'
+alias vmutt='vim ~/.muttrc'
+
+vimplugin() {
+    cd ~/.vim/bundle
+    git clone $1
+}
+
+# Source bashrc
+alias sb='source ~/.bashrc'
+
+# Git aliases
+alias gp='git pull --rebase upstream master'
+alias gm='git checkout master'
+alias gc='git checkout -b'
+alias gcnf='git config --global'
+alias gb='git branch'
+alias gs='git status'
+alias gc='git commit'
+alias gD='git branch -D'
+alias gr5='git rebase -i HEAD~5'
+
+delbranch() {
+    git branch -D $1
+    git branch -d -r origin/$1
+    git push -d origin $1
+}
+
+# Minikube aliases
+alias ms='sudo -E minikube start'
+
+# Alembic aliases
+alias alembic='python3 -m alembic.config'
+alias auh='alembic upgrade head'
+alias ad1='alembic downgrade -1'
+
+# Reverse aliases
+alias mitmproxy="/$DOTFILESPATH/tools/reverse/mitmproxy/mitmproxy"
+alias mitmweb="/$DOTFILESPATH/tools/reverse/mitmproxy/mitmweb"
+
+alias apktool="/$DOTFILESPATH/tools/reverse/apktool"
+
+fingerprint() {
+    eval "openssl x509 -in ~/.mitmproxy/mitmproxy-ca-cert.pem -inform pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -$1 -binary | openssl enc -$2"
+}
+
+alias genkeystore="keytool -genkey -v -keystore bi.keystore -alias bi -keyalg RSA -keysize 2048 -validity 10000"
+
+apksign() {
+    jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 -keystore ~/dev/reverse/bi.keystore $1 bi
+}
+
+buildapk() {
+    apktool b $1 -o $(echo -n $1 | sed 's/\.\///g' | echo $(cat)'_new.apk')
+}
+
+decompileapk() {
+    apktool d -f -r $(echo $1)
+}
+
+pullapk() {
+    if [ -z "$2" ]; then
+        dest="/$DOTFILESPATH/tools/reverse/apk/$1/"
+    else
+        dest=$2/$1/
+    fi
+
+    mkdir -p $dest
+
+    for path in $(adb shell pm path $1 | sed 's/package://g'); do
+        adb pull $path $dest
+    done
+}
+
+alignapk() {
+    zipalign -f -v 4 $1 $(echo -n $1 | sed 's/\.\///g' | echo $(cat)'_aligned.apk')
+}

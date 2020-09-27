@@ -1,0 +1,26 @@
+export DOTFILESPATH="$HOME/dotfiles"
+
+# PATH
+export PATH=$PATH:$DOTFILESPATH/pathed:$DOTFILESPATH/tools
+
+# PYTHONPATH
+export PYTHONPATH=$PYTHONPATH:$DOTFILESPATH/pypathed
+
+# MINIKUBE
+export CHANGE_MINIKUBE_NONE_USER=true
+
+# EDITORS
+export VISUAL='code'
+export EDITOR='nano'
+
+# TERMINAL
+export TERMINAL='urxvt'
+
+# colored GCC warnings and errors
+export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
+
+# Bash completion scripts
+source <(kubectl completion bash)
+
+# Python env vars
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt

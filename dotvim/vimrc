@@ -1,0 +1,69 @@
+set nocompatible
+
+filetype off
+
+execute pathogen#infect()
+call pathogen#helptags()
+
+filetype plugin indent on
+syntax on
+
+set encoding=utf-8
+
+set number
+set nowrap
+set showmatch
+set visualbell
+
+set hlsearch
+set smartcase
+set incsearch
+
+set autoindent
+set expandtab
+set shiftwidth=4
+set smartindent
+set smarttab
+set softtabstop=4
+
+set confirm
+set ruler
+
+set undolevels=1000
+set backspace=indent,eol,start
+
+
+let g:lightline = {
+    \ 'colorscheme': 'onehalfdark',
+    \ 'active': {
+    \   'left': [ [ 'mode', 'paste' ],
+    \             [ 'gitbranch', 'readonly', 'filename', 'modified' ] ]
+    \ },
+    \ 'component_function': {
+    \   'gitbranch' : 'fugitive#head'
+    \ },
+    \ }
+
+map <C-H> <C-W>h
+map <C-J> <C-W>j
+map <C-K> <C-W>k
+map <C-L> <C-W>l
+
+" Syntastic settings
+set statusline+=%#warningmsg#
+set statusline+=%{SyntasticStatuslineFlag()}
+set statusline+=%*
+
+let g:syntastic_always_populate_loc_list = 1
+let g:syntastic_auto_loc_list = 1
+let g:syntastic_check_on_open = 1
+let g:syntastic_check_on_wq = 0
+
+" Color scheme
+
+colorscheme gruvbox
+
+" Airline config
+
+let g:airline_powerline_fonts = 1
+

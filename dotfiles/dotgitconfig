@@ -1,0 +1,48 @@
+[user]
+	name = Simon Bordeyne
+	email = simon.bordeyne@gmail.com
+
+[core]
+	editor = nano
+
+[color]
+    branch = auto
+    diff = auto
+    interactive = auto
+
+[alias]
+	br = branch
+	ci = commit
+	unstage = reset HEAD --
+	last = log -l HEAD
+	gud = !git add -p && git commit --amend && git push -f
+
+    st = status
+    co = checkout
+    ri = rebase -i
+    cp = cherry-pick
+
+    amend = commit --amend
+    cdiff = diff --cached
+
+    rabort = rebase --abort
+    rcont = rebase --continue
+
+    cpabort = cherry-pick --abort
+    cpcont = cherry-pick --continue
+
+    delbranch = "!git branch -D $1; git branch -d -r origin/$1; git push -d origin $1; :"
+
+[merge]
+    summary = true
+    diffstat = true
+
+[rebase]
+    autosquash = true
+    autostash = true
+
+[rerere]
+    enabled = true
+
+[branch]
+    autoSetupRebase = always

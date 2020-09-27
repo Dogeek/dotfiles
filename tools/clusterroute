@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+
+from urllib.parse import parse_qsl
+from subprocess import check_output
+import io
+
+from flask import Flask, request
+import requests
+
+
+def get_ip(service_name='nora-asgi-app'):
+    out = check_output(['kubectl', 'describe', 'svc', service_name])
+    for line in io.StringIO(out.decode('utf8')):
+        if line.startswith('IP:'):
+            return line.split()[-1]
+
+
+app = Flask(__name__)
+
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+def catch_all(path):
+    ip = get_ip()
+    params = parse_qsl(request.query_string.decode('utf8'))
+    response = requests.request(
+        request.method,
+        'http://%s:8000/%s' % (ip, path),
+        params=params if params else None,
+        data=request.data if request.data else None,
+        headers=request.headers if request.headers else None,
+    )
+    return response.text
+
+if __name__ == '__main__':
+    app.run(host='10.16.10.90', port=8000)
