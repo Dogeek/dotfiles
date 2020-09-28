@@ -41,3 +41,4 @@ toml
 urllib3
 typer
 i3pyblocks[blocks.dbus,blocks.http,blocks.i3ipc,blocks.inotify,blocks.ps,blocks.pulse,blocks.x11]
+gkeepapi

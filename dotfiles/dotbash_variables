@@ -24,3 +24,6 @@ source <(kubectl completion bash)
 
 # Python env vars
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+# Password Store
+export PASSOWRD_STORE_DIR="$DOTFILESPATH/password_store"

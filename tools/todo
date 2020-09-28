@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+
+# TODO: add export subparser (export to google keep, json, csv, md)
+# TODO: add import subparser (import from keep, json, csv, md, sqlite db)
+# TODO: add reminder feature to remind you to do a task in the i3 notification
+#       on a specific date and time + recurring reminders
+# TODO: add changelog subparser to view todo changelog
+
+import argparse
+import csv
+from datetime import datetime, timedelta
+import io
+import itertools
+import json
+import re
+import sqlite3
+import sys
+import webbrowser
+from wsgiref.simple_server import make_server
+
+import gkeepapi
+
+
+__version__ = '0.0.1'
+__prog__ = 'todo'
+__author__ = 'Simon Bordeyne'
+
+
+tdelta_re = re.compile((
+    r'(?P<weeks>\d+w)?(?P<days>\d+d)?(?P<hours>\d+h)?'
+    r'(?P<minutes>\d+s)?(?P<seconds>\d+s)?'
+))
+
+
+def todo_app(environ, start_response):
+    def fmt_task(id, task, done, date):
+        lbl = f"#{id} @ {date} : {task}"
+        ipt = (
+            f'<input type="checkbox" name="task-{id}" '
+            f'{"checked" if int(done) else ""}>'
+        )
+        return f"""<div>
+            {ipt}
+            <label for="task-{id}">{lbl}</label>
+        </div>
+        """
+
+    db = args['db']
+    data = sql_to_dict(db)
+    list_tpl = """<div>
+        <h2 class="{name} list-title">{name_cap}</h2>
+        <ul class="list">
+            {tasks}
+        </ul>
+    </div>
+    """
+    lists = '\n'.join(
+        list_tpl.format(
+            name=name[0],
+            name_cap=name[0].capitalize(),
+            tasks='\n'.join(
+                f"<li>{fmt_task(**t)}</li>" for t in values
+            )
+        ) for name, values in data.items()
+    )
+
+    status = '200 OK'
+    headers = [('Content-Type', 'text/html; charset=utf-8')]
+    start_response(status, headers)
+    ret = """<!DOCTYPE html>
+    <html>
+        <body>
+            {lists}
+        </body>
+    </html>
+    """.format(lists=lists).encode('utf-8')
+    return [ret]
+
+
+def create_table(db, tablename):
+    cursor = db.cursor()
+    cursor.execute((
+        "CREATE TABLE IF NOT EXISTS `%s` "
+        "(id integer PRIMARY KEY AUTOINCREMENT, "
+        "task text NOT NULL, date text, done integer DEFAULT 0);"
+    ) % tablename)
+    db.commit()
+
+
+def insert_into(db, tablename, task):
+    date = datetime.now().isoformat(sep=' ')
+    done = 0
+    cursor = db.cursor()
+    cursor.execute((
+        "INSERT INTO `%s` (task, date, done) VALUES (?, ?, ?);"
+    ) % tablename, (task, date, done))
+    db.commit()
+
+
+def get_version():
+    return f'{__prog__} v{__version__} by {__author__}'
+
+
+def sql_to_dict(db):
+    c = db.cursor()
+    c.execute((
+        "SELECT name FROM sqlite_master WHERE type ='table' AND"
+        " name NOT LIKE 'sqlite_%';"
+    ))
+    tablenames = c.fetchall()
+    data = {}
+    for table in tablenames:
+        c.execute("SELECT * from `%s`" % table)
+        data[table] = [dict(zip(("id", "task", "date", "done"), t)) for t in c]
+    return data
+
+
+def add(task, list, db):
+    create_table(db, list)
+    insert_into(db, list, task)
+    return 0
+
+
+def list_(list, db, only_done):
+    c = db.cursor()
+    c.execute((
+        "SELECT * "
+        "FROM `%s` WHERE `done`=?;"
+    ) % list, (only_done, ))
+
+    has_tasks = False
+    for id, task, date, done in c.fetchall():
+        print(f"#{id}@{date}: {task}")
+        has_tasks = True
+    else:
+        if not has_tasks:
+            print("No tasks found.")
+            return 1
+    return 0
+
+
+def do(list, db, task_ids):
+    c = db.cursor()
+    c.executemany((
+        "UPDATE `%s` SET done = 1 WHERE id=?;"
+    ) % list, task_ids)
+    db.commit()
+    return 0
+
+
+def undo(list, db, task_ids):
+    c = db.cursor()
+    c.executemany((
+        "UPDATE `%s` SET done = 0 WHERE id=?;"
+    ) % list, task_ids)
+    db.commit()
+    return 0
+
+
+def export(db, _json=False, _csv=False, keep=False, md=False):
+    data = sql_to_dict(db)
+    if _json:
+        print(json.dumps(data, indent=4))
+        return 0
+    if _csv:
+        with io.StringIO() as csvfile:
+            fieldnames = ("id", "task", "date", "done")
+            writer = csv.DictWriter(
+                csvfile, fieldnames=fieldnames, dialect='unix',
+            )
+            writer.writeheader()
+            d = itertools.chain(*data.values())
+            for row in d:
+                writer.writerow(row)
+            csvfile.seek(0)
+            print('\n'.join(csvfile.readlines()))
+        return 0
+    if md:
+        print('# To-do list\n')
+        for listname, list_ in data.items():
+            print(f'## {listname[0].capitalize()}\n')
+            for task in list_:
+                t = dict(task.items())
+                t['done'] = [" ", "x"][int(task["done"])]
+                print('- [{done}] #{id} - {task} (*{date}*)'.format(**t))
+        return 0
+    if keep:
+        raise NotImplementedError(
+            "Google keep export not implemented in this version"
+        )
+    return 1
+
+
+def view(db, bind):
+    host, port = bind.split(':')
+    port = int(port)
+    bind = host, port
+    with make_server(host, port, todo_app) as httpd:
+        webbrowser.open(f'http://{host}:{port}/')
+        httpd.serve_forever()
+
+
+def purge(db, list, older_than, no_confirm, not_done):
+    def cmpdate(date1, date2):
+        date1 = datetime.fromisoformat(date1)
+        date2 = datetime.fromisoformat(date2)
+        return date1 < date2
+
+    match = tdelta_re.match(older_than)
+    if match is None:
+        print((
+            'Invalid format for `older_than`. Expected '
+            '\\d+w\\d+d\\d+h\\d+m\\d+s and got %s') % older_than
+        )
+        return 1
+
+    data = sql_to_dict(db)[list]
+    cutoff = datetime.now()
+    cutoff = (
+        cutoff - timedelta(**tdelta_re.match(older_than).groupdict())
+    ).isoformat()
+    ids_to_purge = []
+    for i, d in enumerate(data):
+        if cmpdate(d['date'], cutoff):
+            if not_done:
+                ids_to_purge.append(d['id'])
+            if not not_done and d['done']:
+                ids_to_purge.append(d['id'])
+
+    if not no_confirm:
+        print((
+            'This will delete the following tasks '
+            'id from %s : %s') % (list, ids_to_purge)
+        )
+        ans = ''
+        while ans.lower() not in ('y', 'yes', 'no', 'n'):
+            ans = input('Are you sure? ')
+        if ans.lower().startswith('n'):
+            return 0
+
+    c = db.cursor()
+    c.executemany((
+        'DELETE FROM `%s` WHERE `id`=?'
+    ) % list, ids_to_purge)
+    db.commit()
+
+
+parser = argparse.ArgumentParser(
+    prog=__prog__,
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    description=(
+        "A simple TODO CLI that stores its data in an SQLite3 database."
+    )
+)
+parser.add_argument('--version', '-V', action='version', version=get_version())
+
+subparsers = parser.add_subparsers(
+    title='subcommands'
+)
+
+add_parser = subparsers.add_parser(
+    'add', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help="Adds a task to a list."
+)
+add_parser.add_argument('task', type=str, help='Task to do.')
+add_parser.add_argument(
+    '--list', '-l', type=str, help='List to add the task to.',
+    default='default'
+)
+add_parser.set_defaults(callback=add)
+
+list_parser = subparsers.add_parser(
+    'list', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help="Lists tasks in a list. Can filter tasks by 'done' status"
+)
+list_parser.add_argument(
+    '--list', '-l', help='List to get the tasks of.',
+    default='default'
+)
+list_parser.add_argument(
+    '--onlydone', '-d', action='store_const', const=1, dest='only_done',
+    help='Only the tasks which have been done.', default=0,
+)
+list_parser.set_defaults(callback=list_)
+
+do_parser = subparsers.add_parser(
+    'do', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help="Marks tasks as 'done'"
+)
+do_parser.add_argument('task_ids', nargs='+')
+do_parser.add_argument(
+    '--list', '-l', default='default',
+    help='List in which the task is.'
+)
+do_parser.set_defaults(callback=do)
+
+undo_parser = subparsers.add_parser(
+    'undo', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help="Marks tasks as 'not done'."
+)
+undo_parser.add_argument('task_ids', nargs='+')
+undo_parser.add_argument(
+    '--list', '-l', default='default',
+    help='List in which the task is.'
+)
+undo_parser.set_defaults(callback=undo)
+
+export_parser = subparsers.add_parser(
+    'export', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help='Exports the TODO lists to the specified format. Markdown by default.'
+)
+grp = export_parser.add_mutually_exclusive_group()
+grp.add_argument(
+    '--json', action='store_true', dest='_json',
+    help='Prints the TODO list as json to stdout'
+)
+grp.add_argument(
+    '--csv', action='store_true', dest='_csv',
+    help='Prints the TODO list as csv to stdout'
+)
+grp.add_argument(
+    '--md', action='store_true', default=True,
+    help='Prints the TODO list as md to stdout'
+)
+grp.add_argument(
+    '--keep', action='store_true',
+    help='Exports the TODO list to Google Keep'
+)
+export_parser.set_defaults(callback=export)
+
+view_parser = subparsers.add_parser(
+    'view', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help=(
+        'Views the TODO list as an HTML webpage. Starts '
+        'a WSGI app and opens the browser at that address.'
+    )
+)
+view_parser.add_argument(
+    '--bind', default='localhost:8080',
+    help='The address where to start the wsgi server'
+)
+view_parser.set_defaults(callback=view)
+
+purge_parser = subparsers.add_parser(
+    'purge', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    help=(
+        'Purges the database from old entries.'
+    )
+)
+purge_parser.add_argument(
+    '--list', '-l', type=str, default='default',
+    help='The TODO list to purge',
+)
+purge_parser.add_argument(
+    '--older', '-o', dest='older_than', default='1w',
+    help=(
+        'Purge entries that are older than that cutoff from today. '
+        'The format is "\\d+w\\d+d\\d+h\\d+m\\d+s".'
+    ),
+)
+purge_parser.add_argument(
+    '--no-confirm', '-f', dest='no_confirm', action='store_true',
+    help="Don't ask for confirmation before purging."
+)
+purge_parser.add_argument(
+    '--not-done', '-d', dest='not_done', action='store_true',
+    help="Include tasks that are not done yet."
+)
+
+args = vars(parser.parse_args())
+callback = args.pop('callback')
+args['db'] = sqlite3.connect('./todo.db')
+sys.exit(callback(**args))

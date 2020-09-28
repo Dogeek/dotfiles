@@ -47,3 +47,5 @@ done
 # install python packages
 
 sudo pip3 install -r py_modules.txt
+
+gpg --gen-key
