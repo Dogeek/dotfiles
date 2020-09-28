@@ -1,6 +1,8 @@
 from i3pyblocks import core, utils
 from i3pyblocks.blocks import datetime, i3ipc, ps, pulse, x11
 
+from customblocks import timer
+
 
 async def main():
     runner = core.Runner()
@@ -34,6 +36,9 @@ async def main():
             format_on='-',
             format_off='x',
         )
+    )
+    await runner.register_block(
+        timer.TimerBlock()
     )
 
     await runner.start()

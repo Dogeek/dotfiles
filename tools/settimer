@@ -1,0 +1,25 @@
+#! /usr/bin/env python3
+
+import argparse
+import os
+import signal
+from subprocess import check_output
+
+
+def get_pid(name):
+    return int(check_output(["pidof", "-s", name]))
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('timer')
+args = parser.parse_args()
+
+timer = args.timer.split(':')
+timer += [''] * (3 - len(timer))
+timer = list(reversed(timer))
+
+seconds, minutes, hours = [int(t) for t in timer]
+with open('/tmp/timer', 'w') as f:
+    f.write(str(seconds + 60 * minutes + 3600 * hours))
+
+os.kill(get_pid('i3pyblocks'), signal.SIGUSR1)
