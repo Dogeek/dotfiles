@@ -1,28 +1,67 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 
-# TODO: add export subparser (export to google keep, json, csv, md)
 # TODO: add import subparser (import from keep, json, csv, md, sqlite db)
 # TODO: add reminder feature to remind you to do a task in the i3 notification
 #       on a specific date and time + recurring reminders
-# TODO: add changelog subparser to view todo changelog
+# TODO: add search subparser to search tasks by date, keywords and done status
+# TODO: Improve help output of the app (on todo -h,
+#       add all the subparser options, for instance)
+# TODO: Improve todo web app
+#       - interactible checkbuttons should mark a task as done
+#       - Add tabs for each todo list
+#       - Add config tab to edit the configuration
+#       - Add text box to add a note to a list
+#       - Add buttons to export (json, md, keep, csv)
+#       - Add buttons to import (json, md, keep, sqlite, csv)
+#       - Do some styling
+#       - Add login feature (for encrypted notes)
+#       - Add search feature
+#       - Add drag and drop feature to move tasks from one list to another
+# TODO: Create todo lists from several code files
+#       look through a specific folder (argument), and create a new todo list,
+#       whose name is the file path, with all the TODO comments from every file
+#       in that path. Option to configure the TODO comment syntax (regexp ?)
 
 import argparse
+import base64
 import csv
 from datetime import datetime, timedelta
+import getpass
+import hashlib
 import io
 import itertools
 import json
+import os
 import re
 import sqlite3
+import secrets
+import subprocess
 import sys
 import webbrowser
 from wsgiref.simple_server import make_server
 
-import gkeepapi
+try:
+    import gkeepapi
+except ImportError:
+    print((
+        'Cannot import gkeepapi. `pip install gkeepapi`'
+        ' to add google keep import/export features'
+    ))
+
+try:
+    from Cryptodome.Cipher import AES
+except ImportError:
+    try:
+        from Crypto.Cipher import AES
+    except ImportError:
+        print((
+            'Cannot import Crypto. `pip install pycryptodomex`'
+            ' to enable encryption support'
+        ))
 
 
-__version__ = '0.0.1'
+__version__ = '0.0.5'
 __prog__ = 'todo'
 __author__ = 'Simon Bordeyne'
 
@@ -31,6 +70,177 @@ tdelta_re = re.compile((
     r'(?P<weeks>\d+w)?(?P<days>\d+d)?(?P<hours>\d+h)?'
     r'(?P<minutes>\d+s)?(?P<seconds>\d+s)?'
 ))
+
+
+class DefaultConfig:
+    defaults = {
+        'default_list': 'default',
+        'view.bind': 'localhost:8080',
+        'lsl.sep': ', ',
+        'export.default': 'md',
+        'purge.older': '1w',
+        'login.username': '',
+        'login.password': '',
+        'login.salt': '',
+        'login.expires_in': '30m',
+        'add.encrypt': 'false',
+    }
+
+
+def is_logged_in(db: sqlite3.Connection) -> bool:
+    '''
+    Checks if the user is logged in
+
+    :param db: The sqlite3 database object
+    :type db: sqlite3.Connection
+    :return: whether the user is logged in.
+    :rtype: bool
+    '''
+    c = db.cursor()
+    c.execute('SELECT `value` FROM `meta` WHERE `key`="logged_in";')
+    now = datetime.now()
+    cutoff = datetime.fromisoformat(c.fetchone()[0])
+    return now <= cutoff
+
+
+def generate_encrypt_key():
+    return base64.b64encode(
+        secrets.token_bytes(32)
+    ).decode('utf8')
+
+
+def get_encrypt_key(db) -> bytes:
+    c = db.cursor()
+    c.execute('SELECT `value` FROM `meta` WHERE `key`="encrypt_key"')
+    key = c.fetchone()
+    # The key is stored as a base64 encoded string in the db
+    return base64.b64decode(key)
+
+
+def encrypt(key: bytes, data: str) -> str:
+    cipher = AES.new(key, AES.MODE_EAX)
+    # Encode the nonce as a base 64 string
+    nonce = base64.b64encode(cipher.nonce).decode('utf8')
+    data = data.encode('utf8')  # turn data to bytes
+    data, tag = cipher.encrypt_and_digest(data)
+    data = '$'.join((nonce, base64.b64encode(data).decode('utf8')))
+    return data
+
+
+def decrypt(key: bytes, data: str) -> str:
+    nonce, data = data.split('$')
+    nonce = base64.b64decode(nonce)
+    data = base64.b64decode(data)
+
+    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+    return cipher.decrypt(data).decode('utf8')
+
+
+def get_config(db, key: str) -> str:
+    c = db.cursor()
+    c.execute("SELECT `value` FROM `config` WHERE `key`=?;", [key])
+    return c.fetchone()
+
+
+def reserved_name(func):
+    names = ('reminders', 'meta', 'info', 'sqlite_master', 'config')
+
+    def wrapper(**kwargs):
+        listname = kwargs.get('list', '')
+        if listname in names:
+            print(f'List {listname} is reserved by the TODO app.')
+            return 1
+        return func(**kwargs)
+    return wrapper
+
+
+def get_gkeep_client() -> gkeepapi.Keep:
+    keep = gkeepapi.Keep()
+    emailp = subprocess.run(['pass', 'show', 'todo/gkeep_email'], text=True)
+    if emailp.returncode == 1:
+        # There is no email in the password store
+        email = input("Enter your google account's email : ")
+        subprocess.run(
+            ['pass', 'insert', 'todo/gkeep_email'],
+            stdin=io.StringIO(email)
+        )
+    else:
+        email = emailp.stdout
+    tokenp = subprocess.run(['pass', 'show', 'todo/gkeep_token'], text=True)
+    if tokenp.returncode == 0:
+        keep.resume(email, tokenp.stdout)
+    else:
+        while True:
+            password = getpass.getpass(
+                "Please enter your google password : "
+            )
+            password2 = getpass.getpass(
+                "Please confirm your google password : "
+            )
+            if password == password2:
+                break
+            print('The passwords do not match, please try again.')
+        subprocess.run(
+            ['pass', 'insert', 'todo/gkeep_password'],
+            stdin=io.StringIO(password)
+        )
+        keep.login(email, password)
+        subprocess.run(
+            ['pass', 'insert', 'todo/gkeep_token'],
+            stdin=io.StringIO(keep.getMasterToken())
+        )
+    return keep
+
+
+def is_pass_installed() -> bool:
+    '''
+    Checks whether or not `pass` is installed on the machine
+    Used to hold GKeep secrets, and todo encryption keys
+
+    :return: Whether or not `pass` is installed
+    :rtype: bool
+    '''
+    process = subprocess.run(['which', 'pass'], check=True)
+    return process.returncode == 0
+
+
+def setup_meta(db):
+    c = db.cursor()
+    c.execute((
+        "CREATE TABLE IF NOT EXISTS `meta` "
+        "(id integer PRIMARY KEY AUTOINCREMENT, "
+        "key text NOT NULL, value text NOT NULL);"
+    ))
+    db.commit()
+
+    # Insert the meta loggedin key once into the meta table
+    # This key holds the datetime at which the login expires
+    c.execute('SELECT `value` FROM `meta` WHERE `key`="logged_in";')
+    if c.fetchone() is None:
+        # If the key doesn't exists in the table
+        c.execute(
+            "INSERT INTO `meta` (`key`, `value`) VALUES (?, ?);",
+            ('logged_in', datetime.now().isoformat(sep=' ')),
+        )
+        db.commit()
+
+    c.execute('SELECT `value` FROM `meta` WHERE `key`="encrypt_key";')
+    if c.fetchone() is None:
+        # If the key doesn't exists in the table
+        c.execute(
+            "INSERT INTO `meta` (`key`, `value`) VALUES (?, ?);",
+            ('encrypt_key', generate_encrypt_key()),
+        )
+        db.commit()
+
+    c.execute('SELECT `value` FROM `meta` WHERE `key`="encrypt_nonce";')
+    if c.fetchone() is None:
+        # If the key doesn't exists in the table
+        c.execute(
+            "INSERT INTO `meta` (`key`, `value`) VALUES (?, ?);",
+            ('encrypt_key', ''),
+        )
+        db.commit()
 
 
 def todo_app(environ, start_response):
@@ -83,7 +293,8 @@ def create_table(db, tablename):
     cursor.execute((
         "CREATE TABLE IF NOT EXISTS `%s` "
         "(id integer PRIMARY KEY AUTOINCREMENT, "
-        "task text NOT NULL, date text, done integer DEFAULT 0);"
+        "task text NOT NULL, date text, done integer DEFAULT 0, "
+        "encrypted integer DEFAULT 0);"
     ) % tablename)
     db.commit()
 
@@ -102,7 +313,16 @@ def get_version():
     return f'{__prog__} v{__version__} by {__author__}'
 
 
-def sql_to_dict(db):
+def sql_to_dict(db, do_decrypt=False):
+    def _dc(row):
+        id, task, date, done, encrypted = row
+        nonlocal do_decrypt
+        if do_decrypt and is_logged_in(db) and encrypted:
+            task = decrypt(get_encrypt_key(), task)
+        elif encrypted and (not is_logged_in(db) or not do_decrypt):
+            return False
+        return (id, task, date, done, encrypted)
+
     c = db.cursor()
     c.execute((
         "SELECT name FROM sqlite_master WHERE type ='table' AND"
@@ -112,25 +332,37 @@ def sql_to_dict(db):
     data = {}
     for table in tablenames:
         c.execute("SELECT * from `%s`" % table)
-        data[table] = [dict(zip(("id", "task", "date", "done"), t)) for t in c]
+        rows = [_dc(row) for row in c if _dc(row)]
+        data[table] = [
+            dict(zip(("id", "task", "date", "done", "encrypted"), t))
+            for t in rows
+        ]
     return data
 
 
-def add(task, list, db):
+@reserved_name
+def add(db, task, list, encrypt):
     create_table(db, list)
+    if encrypt:
+        task = encrypt(get_encrypt_key(db), task)
     insert_into(db, list, task)
     return 0
 
 
-def list_(list, db, only_done):
+@reserved_name
+def list_(list, db, only_done, do_decrypt=False):
+    if not is_logged_in(db):
+        do_decrypt = False
     c = db.cursor()
     c.execute((
         "SELECT * "
-        "FROM `%s` WHERE `done`=?;"
-    ) % list, (only_done, ))
+        "FROM `%s` WHERE (`done`=? AND `encrypted`=?);"
+    ) % list, (only_done, int(do_decrypt)))
 
     has_tasks = False
-    for id, task, date, done in c.fetchall():
+    for id, task, date, done, encrypted in c.fetchall():
+        if encrypted and do_decrypt:
+            task = decrypt(get_encrypt_key(db), task)
         print(f"#{id}@{date}: {task}")
         has_tasks = True
     else:
@@ -140,26 +372,28 @@ def list_(list, db, only_done):
     return 0
 
 
+@reserved_name
 def do(list, db, task_ids):
     c = db.cursor()
     c.executemany((
         "UPDATE `%s` SET done = 1 WHERE id=?;"
-    ) % list, task_ids)
+    ) % list, [[tid] for tid in task_ids])
     db.commit()
     return 0
 
 
+@reserved_name
 def undo(list, db, task_ids):
     c = db.cursor()
     c.executemany((
         "UPDATE `%s` SET done = 0 WHERE id=?;"
-    ) % list, task_ids)
+    ) % list, [task_ids])
     db.commit()
     return 0
 
 
-def export(db, _json=False, _csv=False, keep=False, md=False):
-    data = sql_to_dict(db)
+def export(db, _json=False, _csv=False, keep=False, md=False, do_decrypt=False):
+    data = sql_to_dict(db, do_decrypt)
     if _json:
         print(json.dumps(data, indent=4))
         return 0
@@ -186,9 +420,48 @@ def export(db, _json=False, _csv=False, keep=False, md=False):
                 print('- [{done}] #{id} - {task} (*{date}*)'.format(**t))
         return 0
     if keep:
-        raise NotImplementedError(
-            "Google keep export not implemented in this version"
-        )
+        if not is_pass_installed():
+            print((
+                "`pass` is not installed. Please install it"
+                ", along with `gnupg` using your system's package manager"
+            ))
+            return 1
+        try:
+            keep = get_gkeep_client()
+        except gkeepapi.exception.LoginException:
+            print('Could not login to google keep.')
+            print('If you have 2FA enabled, create and use an App Password')
+            print((
+                'Otherwise, try visiting this link '
+                'https://accounts.google.com/b/0/DisplayUnlockCaptcha'
+                ' and clicking the continue button.'
+            ))
+            return 1
+
+        for note_title, notes in data.items():
+            # Try to find an existing note with the proper note title
+            gnotes = list(
+                keep.find(
+                    func=lambda x: x.title == note_title.capitalize()
+                )
+            )
+            if len(gnotes) == 0:
+                # No notes exist yet, create a new note
+                tasks = [(t['task'], t['done'] == 1) for t in notes]
+                keep.createList(title=note_title.capitalize(), items=tasks)
+            else:
+                glist = gnotes[0]
+                for task in notes:
+                    # Add only missing tasks
+                    if task['task'] not in [i[0] for i in glist.items]:
+                        glist.add(task['task'], task['done'] == 1)
+                    else:  # Mark existing tasks as done
+                        gtask = [
+                            glistitem for glistitem in glist.items
+                            if glistitem.text == task['task']
+                        ][0]  # gets the note associated with the task
+                        gtask.checked = task['done'] == 0
+        keep.sync()
     return 1
 
 
@@ -201,6 +474,7 @@ def view(db, bind):
         httpd.serve_forever()
 
 
+@reserved_name
 def purge(db, list, older_than, no_confirm, not_done):
     def cmpdate(date1, date2):
         date1 = datetime.fromisoformat(date1)
@@ -246,129 +520,339 @@ def purge(db, list, older_than, no_confirm, not_done):
     db.commit()
 
 
-parser = argparse.ArgumentParser(
-    prog=__prog__,
-    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    description=(
-        "A simple TODO CLI that stores its data in an SQLite3 database."
+def list_lists(db, sep):
+    data = sql_to_dict(db)
+    print(sep.join(d[0].capitalize() for d in data.keys()))
+    return 1
+
+
+def setup_config(db):
+    c = db.cursor()
+    c.execute((
+        "CREATE TABLE IF NOT EXISTS `config` "
+        "(id integer PRIMARY KEY AUTOINCREMENT, "
+        "key text NOT NULL, value text NOT NULL);"
+    ))
+    db.commit()
+    c.execute("SELECT `key` from `config`;")
+    existing_conf = c.fetchall()
+    cnf = [
+        [str(_) for _ in conf]
+        for conf in DefaultConfig.defaults.items()
+        if conf[0] not in existing_conf
+    ]
+
+    c.executemany((
+        "INSERT INTO `config` (key, value) VALUES (?, ?);"
+    ), cnf)
+    db.commit()
+
+
+def config(db, key, value):
+    c = db.cursor()
+    c.execute("UPDATE `config` SET ?=?;", (key, value))
+    db.commit()
+    return 0
+
+
+def move(db, task_from, list_to):
+    task_id, list_from = task_from.rsplit('.', 1)
+    c = db.cursor()
+    c.execute('SELECT * FROM `%s` WHERE `id`=?;' % list_from, [task_id])
+    task = c.fetchone()[1:]  # strip out the id, it's not necessary
+    c.execute((
+        'DELETE FROM `%s` WHERE `id`=?;'
+    ) % list_from, [task_id])
+    c.execute((
+        "INSERT INTO `%s` (task, date, done) VALUES (?, ?, ?);"
+    ) % list_to, task)
+    db.commit()
+    return 0
+
+
+def login(db, username, password, expires_in, register):
+    if username is None:
+        username = input('Enter your username : ')
+    if password is None:
+        password = getpass.getpass('Enter your password : ')
+
+    db_usr = get_config(db, 'login.username')
+    db_pass = get_config(db, 'login.password')
+    db_salt = get_config(db, 'login.salt')
+
+    c = db.cursor()
+
+    if not db_usr or not db_pass or not db_salt or register:
+        db_salt = salt = secrets.token_hex(8)
+        hashed_pass = hashlib.sha256(
+            (password + salt).encode('utf8')
+        ).hexdigest()
+        infos = {
+            'login.username': username,
+            'login.password': password,
+            'login.salt': salt,
+            'login.password': hashed_pass,
+        }
+        c.executemany("UPDATE `config` SET ?=?;", list(infos.items()))
+        c.execute("UPDATE `meta` SET encrypt_key=?;", [generate_encrypt_key()])
+
+    hashed_pass = hashlib.sha256(
+        (password + db_salt).encode('utf8')
+    ).hexdigest()
+    if hashed_pass == db_pass and username == db_usr:
+        cutoff = (
+            datetime.now() +
+            timedelta(**tdelta_re.match(expires_in).groupdict())
+        ).isoformat()
+        c.execute("UPDATE `meta` SET logged_in=?", [cutoff])
+        db.commit()
+        print('Successfully logged in.')
+        return 0
+    print('Invalid username or password.')
+    return 1
+
+
+def main():
+    path_to_db = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'todo.db'
     )
-)
-parser.add_argument('--version', '-V', action='version', version=get_version())
+    db = sqlite3.connect(path_to_db)
 
-subparsers = parser.add_subparsers(
-    title='subcommands'
-)
+    setup_config(db)
+    setup_meta(db)
 
-add_parser = subparsers.add_parser(
-    'add', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help="Adds a task to a list."
-)
-add_parser.add_argument('task', type=str, help='Task to do.')
-add_parser.add_argument(
-    '--list', '-l', type=str, help='List to add the task to.',
-    default='default'
-)
-add_parser.set_defaults(callback=add)
-
-list_parser = subparsers.add_parser(
-    'list', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help="Lists tasks in a list. Can filter tasks by 'done' status"
-)
-list_parser.add_argument(
-    '--list', '-l', help='List to get the tasks of.',
-    default='default'
-)
-list_parser.add_argument(
-    '--onlydone', '-d', action='store_const', const=1, dest='only_done',
-    help='Only the tasks which have been done.', default=0,
-)
-list_parser.set_defaults(callback=list_)
-
-do_parser = subparsers.add_parser(
-    'do', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help="Marks tasks as 'done'"
-)
-do_parser.add_argument('task_ids', nargs='+')
-do_parser.add_argument(
-    '--list', '-l', default='default',
-    help='List in which the task is.'
-)
-do_parser.set_defaults(callback=do)
-
-undo_parser = subparsers.add_parser(
-    'undo', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help="Marks tasks as 'not done'."
-)
-undo_parser.add_argument('task_ids', nargs='+')
-undo_parser.add_argument(
-    '--list', '-l', default='default',
-    help='List in which the task is.'
-)
-undo_parser.set_defaults(callback=undo)
-
-export_parser = subparsers.add_parser(
-    'export', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help='Exports the TODO lists to the specified format. Markdown by default.'
-)
-grp = export_parser.add_mutually_exclusive_group()
-grp.add_argument(
-    '--json', action='store_true', dest='_json',
-    help='Prints the TODO list as json to stdout'
-)
-grp.add_argument(
-    '--csv', action='store_true', dest='_csv',
-    help='Prints the TODO list as csv to stdout'
-)
-grp.add_argument(
-    '--md', action='store_true', default=True,
-    help='Prints the TODO list as md to stdout'
-)
-grp.add_argument(
-    '--keep', action='store_true',
-    help='Exports the TODO list to Google Keep'
-)
-export_parser.set_defaults(callback=export)
-
-view_parser = subparsers.add_parser(
-    'view', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help=(
-        'Views the TODO list as an HTML webpage. Starts '
-        'a WSGI app and opens the browser at that address.'
+    parser = argparse.ArgumentParser(
+        prog=__prog__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "A simple TODO CLI that stores its data in an SQLite3 database."
+        )
     )
-)
-view_parser.add_argument(
-    '--bind', default='localhost:8080',
-    help='The address where to start the wsgi server'
-)
-view_parser.set_defaults(callback=view)
+    parser.add_argument('--version', '-V', action='version', version=get_version())
 
-purge_parser = subparsers.add_parser(
-    'purge', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    help=(
-        'Purges the database from old entries.'
+    subparsers = parser.add_subparsers(
+        title='subcommands'
     )
-)
-purge_parser.add_argument(
-    '--list', '-l', type=str, default='default',
-    help='The TODO list to purge',
-)
-purge_parser.add_argument(
-    '--older', '-o', dest='older_than', default='1w',
-    help=(
-        'Purge entries that are older than that cutoff from today. '
-        'The format is "\\d+w\\d+d\\d+h\\d+m\\d+s".'
-    ),
-)
-purge_parser.add_argument(
-    '--no-confirm', '-f', dest='no_confirm', action='store_true',
-    help="Don't ask for confirmation before purging."
-)
-purge_parser.add_argument(
-    '--not-done', '-d', dest='not_done', action='store_true',
-    help="Include tasks that are not done yet."
-)
 
-args = vars(parser.parse_args())
-callback = args.pop('callback')
-args['db'] = sqlite3.connect('./todo.db')
-sys.exit(callback(**args))
+    add_encrypt = str(
+        str(get_config(db, "add.encrypt")[0]).lower() != 'true'
+    ).lower()
+
+    add_parser = subparsers.add_parser(
+        'add', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Adds a task to a list.", aliases=['+']
+    )
+    add_parser.add_argument('task', type=str, help='Task to do.')
+    add_parser.add_argument(
+        '--list', '-l', type=str, help='List to add the task to.',
+        default=get_config(db, 'default_list'),
+    )
+    add_parser.add_argument(
+        '--encrypt', action=f'store_{add_encrypt}',
+        help="Turns on on-the-fly encryption.",
+    )
+    add_parser.set_defaults(callback=add)
+
+    list_parser = subparsers.add_parser(
+        'list', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Lists tasks in a list. Can filter tasks by 'done' status",
+        aliases=['ls', 'l']
+    )
+    list_parser.add_argument(
+        '--list', '-l', help='List to get the tasks of.',
+        default=get_config(db, 'default_list'),
+    )
+    list_parser.add_argument(
+        '--onlydone', '-d', action='store_const', const=1, dest='only_done',
+        help='Only the tasks which have been done.', default=0,
+    )
+    list_parser.add_argument(
+        '--decrypt', '-c', action='store_const', const=is_logged_in(db),
+        dest='do_decrypt', default=False,
+        help='Decrypts the tasks on the fly. Requires a log in.',
+    )
+    list_parser.set_defaults(callback=list_)
+
+    list_lists_parser = subparsers.add_parser(
+        'listlists', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Lists all todo lists.",
+        aliases=['lsl', 'lslists', 'lslist', 'listlist', 'listls'],
+    )
+    list_lists_parser.add_argument(
+        '--sep', default=get_config(db, 'lsl.sep'), dest='sep',
+        help="Lists separator. List names are joined together by this value."
+    )
+    list_lists_parser.set_defaults(callback=list_lists)
+
+    do_parser = subparsers.add_parser(
+        'do', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Marks tasks as 'done'", aliases=['done']
+    )
+    do_parser.add_argument('task_ids', nargs='+')
+    do_parser.add_argument(
+        '--list', '-l', default='default',
+        help='List in which the task is.'
+    )
+    do_parser.set_defaults(callback=do)
+
+    undo_parser = subparsers.add_parser(
+        'undo', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Marks tasks as 'not done'.", aliases=['notdone', 'undone']
+    )
+    undo_parser.add_argument('task_ids', nargs='+')
+    undo_parser.add_argument(
+        '--list', '-l', default=get_config(db, 'default_list'),
+        help='List in which the task is.'
+    )
+    undo_parser.set_defaults(callback=undo)
+
+    export_parser = subparsers.add_parser(
+        'export', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help=(
+            'Exports the TODO lists to the specified'
+            ' format. Markdown by default.'
+        ),
+        aliases=['ex']
+    )
+    grp = export_parser.add_mutually_exclusive_group()
+    export_default = get_config(db, 'export.default')
+    json_default = export_default == 'json'
+    csv_default = export_default == 'csv'
+    md_default = export_default == 'md'
+    keep_default = export_default in ('gkeep', 'keep', 'google')
+
+    grp.add_argument(
+        '--json', action='store_true', dest='_json',
+        help='Prints the TODO list as json to stdout',
+        default=json_default,
+    )
+    grp.add_argument(
+        '--csv', action='store_true', dest='_csv',
+        help='Prints the TODO list as csv to stdout',
+        default=csv_default,
+    )
+    grp.add_argument(
+        '--md', action='store_true', default=md_default,
+        help='Prints the TODO list as md to stdout'
+    )
+    grp.add_argument(
+        '--keep', action='store_true', default=keep_default,
+        help='Exports the TODO list to Google Keep'
+    )
+    export_parser.add_argument(
+        '--decrypt', '-c', action='store_const', const=is_logged_in(db),
+        dest='do_decrypt', default=False,
+        help='Decrypts the tasks on the fly. Requires a log in.',
+    )
+    export_parser.set_defaults(callback=export)
+
+    view_parser = subparsers.add_parser(
+        'view', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help=(
+            'Views the TODO list as an HTML webpage. Starts '
+            'a WSGI app and opens the browser at that address.'
+        ),
+        aliases=['web', 'webapp', 'html']
+    )
+    view_parser.add_argument(
+        '--bind', default=get_config(db, 'view.bind'),
+        help='The address where to start the wsgi server'
+    )
+    view_parser.set_defaults(callback=view)
+
+    purge_parser = subparsers.add_parser(
+        'purge', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help=(
+            'Purges the database from old entries.'
+        ), aliases=['-', 'p', 'pg']
+    )
+    purge_parser.add_argument(
+        '--list', '-l', type=str, default=get_config(db, 'default_list'),
+        help='The TODO list to purge',
+    )
+    purge_parser.add_argument(
+        '--older', '-o', dest='older_than', default=get_config(db, 'purge.older'),
+        help=(
+            'Purge entries that are older than that cutoff from today. '
+            'The format is "\\d+w\\d+d\\d+h\\d+m\\d+s".'
+        ),
+    )
+    purge_parser.add_argument(
+        '--no-confirm', '-f', dest='no_confirm', action='store_true',
+        help="Don't ask for confirmation before purging."
+    )
+    purge_parser.add_argument(
+        '--not-done', '-d', dest='not_done', action='store_true',
+        help="Include tasks that are not done yet."
+    )
+
+    config_parser = subparsers.add_parser(
+        'config', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help='Configures TODO app', aliases=['cnf', 'cf'],
+    )
+    config_parser.add_argument(
+        'key', type=str,
+        help=(
+            f'The config key to edit. Available config'
+            f' keys are {"|".join(DefaultConfig.defaults.keys())}'
+        )
+    )
+    config_parser.add_argument(
+        'value', type=str,
+        help='The value to assign to the config key.',
+    )
+    config_parser.set_defaults(callback=config)
+
+    move_parser = subparsers.add_parser(
+        'move', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help='Moves a task from one list to another', aliases=['mv'],
+    )
+    move_parser.add_argument(
+        'task_from', help='Task to move, in the format list.id'
+    )
+    move_parser.add_argument(
+        'list_to',
+        help='Destination list to move the task to.'
+    )
+    move_parser.set_defaults(callback=move)
+
+    login_parser = subparsers.add_parser(
+        'login', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help='Logs into TODO app for 30 minutes',
+    )
+    login_parser.add_argument(
+        '--username', '-u', default=None,
+        help=(
+            'Username to use for the login process. '
+            'If not present, you will be prompted for it.'
+        ),
+    )
+    login_parser.add_argument(
+        '--password', '-p', default=None,
+        help=(
+            'Password to use for the login process. '
+            'If not present, you will be prompted for it.'
+        )
+    )
+    login_parser.add_argument(
+        '--expires-in', '-e', default=get_config(db, 'login.expires_in'),
+        help='The amount of time the login will be valid for.',
+    )
+    login_parser.add_argument(
+        '--register', default=False,
+        help=(
+            'Forces the registration process. '
+            'Existing encrypted notes will be lost.'
+        )
+    )
+    login_parser.set_defaults(callback=login)
+
+    args = vars(parser.parse_args())
+    callback = args.pop('callback')
+    args['db'] = db
+    setup_config(args['db'])
+    sys.exit(callback(**args))
+
+
+if __name__ == '__main__':
+    main()
