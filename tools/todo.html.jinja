@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+    <head>
+    <title>TODO List</title>
+    </head>
+    <body>
+        {% for name, tasks in data.items() %}
+        <h2 class="{{name}} list-title">{{name|title}}</h2>
+        <ul class="list">
+        {% for task in tasks %}
+            <li>
+                <div>
+                    {% set checked = "checked" if task.done == "1" else "" %}
+                    <input type="checkbox" name="task-{{task.id}}" {{ checked }}>
+                    <label for="task-{{task.id}}"> #{{ task.id }} @ {{ task.date }} : {{ task.task }}</label>
+                </div>
+            </li>
+        {% endfor %}
+        </ul>
+        {% endfor %}
+    </body>
+</html>

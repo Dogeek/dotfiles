@@ -22,6 +22,8 @@
 #       look through a specific folder (argument), and create a new todo list,
 #       whose name is the file path, with all the TODO comments from every file
 #       in that path. Option to configure the TODO comment syntax (regexp ?)
+# TODO: Allow configuration through a config file
+#       in ~/.config/todorc or in  ~/.todorc
 
 import argparse
 import base64
@@ -44,10 +46,8 @@ from wsgiref.simple_server import make_server
 try:
     import gkeepapi
 except ImportError:
-    print((
-        'Cannot import gkeepapi. `pip install gkeepapi`'
-        ' to add google keep import/export features'
-    ))
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'gkeepapi'])
+    import gkeepapi
 
 try:
     from Cryptodome.Cipher import AES
@@ -55,10 +55,18 @@ except ImportError:
     try:
         from Crypto.Cipher import AES
     except ImportError:
-        print((
-            'Cannot import Crypto. `pip install pycryptodomex`'
-            ' to enable encryption support'
-        ))
+        subprocess.check_call(
+            [sys.executable, '-m', 'pip', 'install', 'pycryptodomex']
+        )
+        from Cryptodome.Cipher import AES
+
+try:
+    import jinja2
+except ImportError:
+    subprocess.check_call(
+        [sys.executable, '-m', 'pip', 'install', 'jinja2']
+    )
+    import jinja2
 
 
 __version__ = '0.0.5'
@@ -70,6 +78,11 @@ tdelta_re = re.compile((
     r'(?P<weeks>\d+w)?(?P<days>\d+d)?(?P<hours>\d+h)?'
     r'(?P<minutes>\d+s)?(?P<seconds>\d+s)?'
 ))
+RESERVED_NAMES = (
+    'reminders', 'meta', 'info',
+    'sqlite_master', 'config',
+    'sqlite_sequence',
+)
 
 
 class DefaultConfig:
@@ -112,7 +125,7 @@ def generate_encrypt_key():
 def get_encrypt_key(db) -> bytes:
     c = db.cursor()
     c.execute('SELECT `value` FROM `meta` WHERE `key`="encrypt_key"')
-    key = c.fetchone()
+    key = c.fetchone()[0]
     # The key is stored as a base64 encoded string in the db
     return base64.b64decode(key)
 
@@ -139,15 +152,16 @@ def decrypt(key: bytes, data: str) -> str:
 def get_config(db, key: str) -> str:
     c = db.cursor()
     c.execute("SELECT `value` FROM `config` WHERE `key`=?;", [key])
-    return c.fetchone()
+    rv = c.fetchone()
+    if rv:
+        return rv[0]
+    return rv
 
 
 def reserved_name(func):
-    names = ('reminders', 'meta', 'info', 'sqlite_master', 'config')
-
     def wrapper(**kwargs):
         listname = kwargs.get('list', '')
-        if listname in names:
+        if listname in RESERVED_NAMES:
             print(f'List {listname} is reserved by the TODO app.')
             return 1
         return func(**kwargs)
@@ -233,58 +247,27 @@ def setup_meta(db):
         )
         db.commit()
 
-    c.execute('SELECT `value` FROM `meta` WHERE `key`="encrypt_nonce";')
-    if c.fetchone() is None:
-        # If the key doesn't exists in the table
-        c.execute(
-            "INSERT INTO `meta` (`key`, `value`) VALUES (?, ?);",
-            ('encrypt_key', ''),
-        )
-        db.commit()
-
 
 def todo_app(environ, start_response):
-    def fmt_task(id, task, done, date):
-        lbl = f"#{id} @ {date} : {task}"
-        ipt = (
-            f'<input type="checkbox" name="task-{id}" '
-            f'{"checked" if int(done) else ""}>'
-        )
-        return f"""<div>
-            {ipt}
-            <label for="task-{id}">{lbl}</label>
-        </div>
-        """
-
-    db = args['db']
-    data = sql_to_dict(db)
-    list_tpl = """<div>
-        <h2 class="{name} list-title">{name_cap}</h2>
-        <ul class="list">
-            {tasks}
-        </ul>
-    </div>
-    """
-    lists = '\n'.join(
-        list_tpl.format(
-            name=name[0],
-            name_cap=name[0].capitalize(),
-            tasks='\n'.join(
-                f"<li>{fmt_task(**t)}</li>" for t in values
-            )
-        ) for name, values in data.items()
+    environ['TODO_DB_PATH'] = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'todo.db'
     )
+
+    db = sqlite3.connect(environ['TODO_DB_PATH'])
+    data = sql_to_dict(db)
+
+    with open(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'todo.html.jinja'
+        )
+    ) as tplf:
+        template = jinja2.Template(tplf.read())
 
     status = '200 OK'
     headers = [('Content-Type', 'text/html; charset=utf-8')]
     start_response(status, headers)
-    ret = """<!DOCTYPE html>
-    <html>
-        <body>
-            {lists}
-        </body>
-    </html>
-    """.format(lists=lists).encode('utf-8')
+    ret = template.render(data=data).encode('utf-8')
     return [ret]
 
 
@@ -326,14 +309,14 @@ def sql_to_dict(db, do_decrypt=False):
     c = db.cursor()
     c.execute((
         "SELECT name FROM sqlite_master WHERE type ='table' AND"
-        " name NOT LIKE 'sqlite_%';"
-    ))
+        " name NOT IN %s;"
+    ) % str(RESERVED_NAMES))
     tablenames = c.fetchall()
     data = {}
     for table in tablenames:
         c.execute("SELECT * from `%s`" % table)
         rows = [_dc(row) for row in c if _dc(row)]
-        data[table] = [
+        data[table[0]] = [
             dict(zip(("id", "task", "date", "done", "encrypted"), t))
             for t in rows
         ]
@@ -471,8 +454,12 @@ def view(db, bind):
     bind = host, port
     with make_server(host, port, todo_app) as httpd:
         webbrowser.open(f'http://{host}:{port}/')
-        httpd.serve_forever()
-
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            httpd.server_close()
+            print('Closing web server...')
+    return 0
 
 @reserved_name
 def purge(db, list, older_than, no_confirm, not_done):
@@ -535,7 +522,7 @@ def setup_config(db):
     ))
     db.commit()
     c.execute("SELECT `key` from `config`;")
-    existing_conf = c.fetchall()
+    existing_conf = [k[0] for k in c]
     cnf = [
         [str(_) for _ in conf]
         for conf in DefaultConfig.defaults.items()
@@ -549,6 +536,14 @@ def setup_config(db):
 
 
 def config(db, key, value):
+    if key not in DefaultConfig.defaults:
+        print(f'Key `{key}` is not a valid config key.')
+        print((
+            f'Available config keys: '
+            f'{" | ".join(DefaultConfig.defaults.keys())}'
+        ))
+        return 1
+
     c = db.cursor()
     c.execute("UPDATE `config` SET ?=?;", (key, value))
     db.commit()
@@ -616,6 +611,7 @@ def main():
     path_to_db = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'todo.db'
     )
+    os.environ['TODO_DB_PATH'] = path_to_db
     db = sqlite3.connect(path_to_db)
 
     setup_config(db)
@@ -635,7 +631,7 @@ def main():
     )
 
     add_encrypt = str(
-        str(get_config(db, "add.encrypt")[0]).lower() != 'true'
+        str(get_config(db, "add.encrypt")).lower() != 'true'
     ).lower()
 
     add_parser = subparsers.add_parser(
@@ -771,7 +767,8 @@ def main():
         help='The TODO list to purge',
     )
     purge_parser.add_argument(
-        '--older', '-o', dest='older_than', default=get_config(db, 'purge.older'),
+        '--older', '-o', dest='older_than',
+        default=get_config(db, 'purge.older'),
         help=(
             'Purge entries that are older than that cutoff from today. '
             'The format is "\\d+w\\d+d\\d+h\\d+m\\d+s".'
