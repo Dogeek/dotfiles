@@ -1,22 +1,245 @@
 <!DOCTYPE html>
 <html>
     <head>
-    <title>TODO List</title>
+        <title>TODO List</title>
+        <style>
+            .navbar {
+                overflow: hidden;
+                border: 1px solid #ccc;
+                background-color: #f1f1f1;
+            }
+
+            .navbar button {
+                background-color: inherit;
+                float: left;
+                border: none;
+                outline: none;
+                text-align: center;
+                cursor: pointer;
+                padding: 14px 16px;
+                transition: 0.3s;
+            }
+
+            .navbar button:hover, .dropdown:hover .dropbtn {
+                background-color: #ddd;
+            }
+
+            .tab button.active {
+                background-color: #ccc;
+            }
+
+            .tabcontent {
+                display: none;
+                padding: 6px 12px;
+                border: 1px solid #ccc;
+                border-top: none;
+                animation: fadeEffect 1s; /* Fading effect takes 1 second */
+            }
+
+            .tabcontent > ul {
+                list-style-type: none;
+            }
+
+            /* Go from zero to full opacity */
+            @keyframes fadeEffect {
+                from {opacity: 0;}
+                to {opacity: 1;}
+            }
+
+            /* Dropdown Button */
+            .dropbtn {
+                background-color: #ddd;
+                padding: 5px;
+                font-size: 16px;
+                border: none;
+                align-self: flex-end;
+            }
+
+            /* The container <div> - needed to position the dropdown content */
+            .dropdown {
+                overflow: hidden;
+                float: left;
+            }
+
+            .dropdown .dropbtn {
+                font-size: 16px;
+                border: none;
+                outline: none;
+                padding: 14px 16px;
+                background-color: inherit;
+                font-family: inherit;
+                margin: 0;
+            }
+
+            /* Dropdown Content (Hidden by Default) */
+            .dropdown-content {
+                display: none;
+                position: absolute;
+                background-color: #f1f1f1;
+                min-width: 160px;
+                box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.2);
+                z-index: 1;
+                margin-top: 50px;
+            }
+
+            /* Links inside the dropdown */
+            .dropdown-content button, .dropdown-content a {
+                float: none;
+                color: black;
+                padding: 12px 16px;
+                text-decoration: none;
+                display: block;
+                text-align: left;
+                width: 100%;
+            }
+
+            /* Change color of dropdown links on hover */
+            .dropdown-content button:hover, .dropdown-content a:hover {background-color: #ccc;}
+
+            /* Show the dropdown menu on hover */
+            .dropdown:hover .dropdown-content {display: block;}
+
+            /* Change the background color of the dropdown button when the dropdown content is shown */
+            .dropdown:hover .dropbtn {background-color: #ccc;}
+        </style>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+        <script src="https://kit.fontawesome.com/078b4e2312.js" crossorigin="anonymous"></script>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
     </head>
-    <body>
-        {% for name, tasks in data.items() %}
-        <h2 class="{{name}} list-title">{{name|title}}</h2>
-        <ul class="list">
-        {% for task in tasks %}
-            <li>
-                <div>
-                    {% set checked = "checked" if task.done == "1" else "" %}
-                    <input type="checkbox" name="task-{{task.id}}" {{ checked }}>
-                    <label for="task-{{task.id}}"> #{{ task.id }} @ {{ task.date }} : {{ task.task }}</label>
+    <body onload="onPageLoad(event)">
+        <script>
+            function sendRequest(method, path, data=null) {
+                let xhr = new XMLHTTPRequest();
+                var response;
+                xhr.open(method, path, true);
+                if (method.toUpperCase() == "POST") {
+                    xhr.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+                }
+                xhr.onreadystatechange = function() {
+                    response = xhr.response;
+                }
+                xhr.send(JSON.stringify(data));
+                return response;
+            }
+
+            function onPageLoad(event) {
+                onTabClick(event, 'tab-default');
+            }
+
+            function onTabClick(event, tabName) {
+                let i, tabcontent, tablinks;
+
+                 // Get all elements with class="tabcontent" and hide them
+                tabcontent = document.getElementsByClassName("tabcontent");
+                for (i = 0; i < tabcontent.length; i++) {
+                  tabcontent[i].style.display = "none";
+                }
+                tablinks = document.getElementsByClassName("tablinks");
+                for (let i = 0; i < tablinks.length; i++) {
+                    tablinks[i].className = tablinks[i].className.replace(" active", "");
+                }
+                document.getElementById(tabName).style.display = "block";
+                event.currentTarget.className += " active";
+            }
+
+            function importList(event, format) {
+            }
+
+            function toggleHideDone(event) {
+                let button = document.getElementById("btnHideDone");
+                if (button.innerText == "Hide Done") {
+                    let doneTasks = document.getElementsByClassName("task-done");
+                    for (let i=0; i < doneTasks.length; i++) {
+                        let task = doneTasks[i];
+                        task.style.display = "none";
+                    }
+                    button.innerHTML = "<i class='fab fa-eye'>Show Done</i>";
+                } else {
+                    let doneTasks = document.getElementsByClassName("task-done");
+                    for (let i=0; i < doneTasks.length; i++) {
+                        let task = doneTasks[i];
+                        task.style.display = "block";
+                    }
+                    button.innerHTML = "<i class='fab fa-eye-slash'>Hide Done</i>";
+                }
+            }
+        </script>
+
+        <header>
+            <h2>TO DO Lists</h2>
+            <div class='navbar'>
+                <div class="dropdown">
+                    <button class='dropbtn'><i class="fas fa-check-square"> TODO Lists</i></button>
+                    <div class="dropdown-content">
+                    {% for name in data %}
+                        <button onclick="onTabClick(event, 'tab-{{name}}')" class='tablinks'>{{name|upper}}</button>
+                    {% endfor %}
+                    </div>
                 </div>
-            </li>
+                <button onclick="onTabClick(event, 'tab-config')" class='tablinks config-tab'>CONFIG</button>
+                <div class="dropdown">
+                    <button class="dropbtn"><i class="fas fa-cloud-download-alt"> Export</i></button>
+                    <div class="dropdown-content">
+                        <a href="/export/md"><i class="fab fa-markdown">Markdown</i></a>
+                        <a href="/export/keep"><i class="fab fa-google-drive">Google Keep</i></a>
+                        <a href="/export/csv"><i class="fab fa-file-csv">CSV</i></a>
+                        <a href="/export/json"><i class="fab fa-code">JSON</i></a>
+                    </div>
+                </div>
+                <div class="dropdown">
+                    <button class="dropbtn"><i class="fas fa-cloud-upload-alt"> Import</i></button>
+                    <div class="dropdown-content">
+                        <button onclick="importList(event, '{{name}}', 'md')"><i class="fab fa-markdown">Markdown</i></button>
+                        <button onclick="importList(event, '{{name}}', 'sql')"><i class="fab fa-database">SQLite</i></button>
+                        <button onclick="importList(event, '{{name}}', 'keep')"><i class="fab fa-google-drive">Google Keep</i></button>
+                        <button onclick="importList(event, '{{name}}', 'csv')"><i class="fab fa-file-csv">CSV</i></button>
+                        <button onclick="importList(event, '{{name}}', 'json')"><i class="fab fa-code">JSON</i></button>
+                    </div>
+                </div>
+                <button onclick="toggleHideDone(event)" id="btnHideDone"><i class='fab fa-eye-slash'>Hide Done</i></button>
+            </div>
+        </header>
+
+        {% for name, tasks in data.items() %}
+        <div class="tabcontent", id="tab-{{name}}">
+            <div class="tab-titlebar">
+                <h2>{{name|title}}</h2>
+            </div>
+            <ul>
+            {% for task in tasks %}
+                <li>
+                    {% if task.done|int %}
+                    <div class="task-done">
+                        <input type="checkbox" name="task-{{task.id}}" checked>
+                        <label for="task-{{task.id}}"> #{{ task.id }} @ {{ task.date }} : {{ task.task }}</label>
+                    </div>
+                    {% else %}
+                    <div>
+                        <input type="checkbox" name="task-{{task.id}}">
+                        <label for="task-{{task.id}}"> #{{ task.id }} @ {{ task.date }} : {{ task.task }}</label>
+                    </div>
+                    {% endif %}
+
+                </li>
+            {% endfor %}
+            </ul>
+            <form>
+                <input type="textarea" name="task">
+            </form>
+        </div>
         {% endfor %}
-        </ul>
-        {% endfor %}
+        <div class="tabcontent" id="tab-config">
+            <h2>Config</h2>
+            <ul>
+                {% for key, value in config.items() %}
+                <li>
+                    <div>
+                        <label for="config-{{key}}"> {{ key }}</label>
+                        <input type="text" name="config-{{key}}" value="{{value}}">
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
     </body>
 </html>

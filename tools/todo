@@ -9,15 +9,11 @@
 #       add all the subparser options, for instance)
 # TODO: Improve todo web app
 #       - interactible checkbuttons should mark a task as done
-#       - Add tabs for each todo list
-#       - Add config tab to edit the configuration
 #       - Add text box to add a note to a list
-#       - Add buttons to export (json, md, keep, csv)
 #       - Add buttons to import (json, md, keep, sqlite, csv)
-#       - Do some styling
 #       - Add login feature (for encrypted notes)
 #       - Add search feature
-#       - Add drag and drop feature to move tasks from one list to another
+#       - Add drag and drop feature to move tasks from one list to another ?
 # TODO: Create todo lists from several code files
 #       look through a specific folder (argument), and create a new todo list,
 #       whose name is the file path, with all the TODO comments from every file
@@ -27,6 +23,7 @@
 
 import argparse
 import base64
+import contextlib
 import csv
 from datetime import datetime, timedelta
 import getpass
@@ -53,7 +50,7 @@ try:
     from Cryptodome.Cipher import AES
 except ImportError:
     try:
-        from Crypto.Cipher import AES
+        from Crypto.Cipher import AES  # noqa
     except ImportError:
         subprocess.check_call(
             [sys.executable, '-m', 'pip', 'install', 'pycryptodomex']
@@ -252,23 +249,57 @@ def todo_app(environ, start_response):
     environ['TODO_DB_PATH'] = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'todo.db'
     )
-
     db = sqlite3.connect(environ['TODO_DB_PATH'])
-    data = sql_to_dict(db)
+    method = environ['REQUEST_METHOD']
+    path = environ['PATH_INFO']
+    print(method, path)
 
-    with open(
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'todo.html.jinja'
-        )
-    ) as tplf:
-        template = jinja2.Template(tplf.read())
+    if path == '/':
+        data = sql_to_dict(db)
+        c = db.cursor()
+        c.execute("SELECT `key`, `value` FROM `config`;")
+        config = dict(c.fetchall())
 
-    status = '200 OK'
-    headers = [('Content-Type', 'text/html; charset=utf-8')]
-    start_response(status, headers)
-    ret = template.render(data=data).encode('utf-8')
-    return [ret]
+        with open(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'todo.html.jinja'
+            )
+        ) as tplf:
+            template = jinja2.Template(tplf.read())
+
+        status = '200 OK'
+        headers = [
+            ('Content-Type', 'text/html; charset=utf-8'),
+        ]
+        start_response(status, headers)
+        ret = template.render(data=data, config=config).encode('utf-8')
+        return [ret]
+
+    if path.startswith('/export'):
+        f = path.split('/')[-1]
+        fmt = {
+            'json': {'_json': True, 'md': False, 'keep': False, '_csv': False},
+            'md': {'_json': False, 'md': True, 'keep': False, '_csv': False},
+            'keep': {'_json': False, 'md': False, 'keep': True, '_csv': False},
+            'csv': {'_json': False, 'md': False, 'keep': False, '_csv': True},
+        }[f]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            export(db, **fmt)
+
+        status = '200 OK'
+        headers = [
+            ('Content-Type', 'text/html; charset=utf-8')
+        ]
+        if f != 'keep':
+            headers.append(
+                ('Content-Disposition', f'attachment; filename="todo-list.{f}')
+            )
+
+        start_response(status, headers)
+        print(out.getvalue())
+        return [out.getvalue().encode('utf-8')]
 
 
 def create_table(db, tablename):
@@ -375,7 +406,8 @@ def undo(list, db, task_ids):
     return 0
 
 
-def export(db, _json=False, _csv=False, keep=False, md=False, do_decrypt=False):
+def export(db, _json=False, _csv=False, keep=False,
+           md=False, do_decrypt=False):
     data = sql_to_dict(db, do_decrypt)
     if _json:
         print(json.dumps(data, indent=4))
@@ -387,16 +419,19 @@ def export(db, _json=False, _csv=False, keep=False, md=False, do_decrypt=False):
                 csvfile, fieldnames=fieldnames, dialect='unix',
             )
             writer.writeheader()
-            d = itertools.chain(*data.values())
+            d = [
+                {field: row[field] for field in fieldnames}
+                for row in itertools.chain(*data.values())
+            ]
             for row in d:
                 writer.writerow(row)
             csvfile.seek(0)
-            print('\n'.join(csvfile.readlines()))
+            print(''.join(csvfile.readlines()))
         return 0
     if md:
         print('# To-do list\n')
         for listname, list_ in data.items():
-            print(f'## {listname[0].capitalize()}\n')
+            print(f'## {listname.capitalize()}\n')
             for task in list_:
                 t = dict(task.items())
                 t['done'] = [" ", "x"][int(task["done"])]
@@ -460,6 +495,7 @@ def view(db, bind):
             httpd.server_close()
             print('Closing web server...')
     return 0
+
 
 @reserved_name
 def purge(db, list, older_than, no_confirm, not_done):
@@ -584,7 +620,6 @@ def login(db, username, password, expires_in, register):
         ).hexdigest()
         infos = {
             'login.username': username,
-            'login.password': password,
             'login.salt': salt,
             'login.password': hashed_pass,
         }
@@ -624,7 +659,10 @@ def main():
             "A simple TODO CLI that stores its data in an SQLite3 database."
         )
     )
-    parser.add_argument('--version', '-V', action='version', version=get_version())
+    parser.add_argument(
+        '--version', '-V', action='version',
+        version=get_version()
+    )
 
     subparsers = parser.add_subparsers(
         title='subcommands'
