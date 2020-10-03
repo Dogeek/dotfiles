@@ -75,6 +75,18 @@ tdelta_re = re.compile((
     r'(?P<weeks>\d+w)?(?P<days>\d+d)?(?P<hours>\d+h)?'
     r'(?P<minutes>\d+s)?(?P<seconds>\d+s)?'
 ))
+fromdate_re = re.compile((
+    r'from: ?((?P<year>\d{4})(-(?P<month>\d\d)(-(?P<day>\d\d)((T| )'
+    r'(?P<hour>\d\d):(?P<minute>\d\d)(:(?P<second>\d\d))?'
+    r'(\.(?P<micro>\d+))?(?P<tz>([+-]\d\d:\d\d)|Z)?)?)?)?)'
+), re.IGNORECASE)
+todate_re = re.compile((
+    r'to: ?((?P<year>\d{4})(-(?P<month>\d\d)(-(?P<day>\d\d)((T| )'
+    r'(?P<hour>\d\d):(?P<minute>\d\d)(:(?P<second>\d\d))?'
+    r'(\.(?P<micro>\d+))?(?P<tz>([+-]\d\d:\d\d)|Z)?)?)?)?)'
+), re.IGNORECASE)
+fullexpr_re = re.compile(r'\"(?P<expr>.+)\"')
+
 RESERVED_NAMES = (
     'reminders', 'meta', 'info',
     'sqlite_master', 'config',
@@ -327,6 +339,15 @@ def get_version():
     return f'{__prog__} v{__version__} by {__author__}'
 
 
+def get_lists(db):
+    c = db.cursor()
+    c.execute((
+        "SELECT name FROM sqlite_master WHERE type ='table' AND"
+        " name NOT IN %s;"
+    ) % str(RESERVED_NAMES))
+    return [table[0] for table in c]
+
+
 def sql_to_dict(db, do_decrypt=False):
     def _dc(row):
         id, task, date, done, encrypted = row
@@ -338,16 +359,12 @@ def sql_to_dict(db, do_decrypt=False):
         return (id, task, date, done, encrypted)
 
     c = db.cursor()
-    c.execute((
-        "SELECT name FROM sqlite_master WHERE type ='table' AND"
-        " name NOT IN %s;"
-    ) % str(RESERVED_NAMES))
-    tablenames = c.fetchall()
+    tablenames = get_lists(db)
     data = {}
     for table in tablenames:
         c.execute("SELECT * from `%s`" % table)
         rows = [_dc(row) for row in c if _dc(row)]
-        data[table[0]] = [
+        data[table] = [
             dict(zip(("id", "task", "date", "done", "encrypted"), t))
             for t in rows
         ]
@@ -544,9 +561,9 @@ def purge(db, list, older_than, no_confirm, not_done):
 
 
 def list_lists(db, sep):
-    data = sql_to_dict(db)
-    print(sep.join(d[0].capitalize() for d in data.keys()))
-    return 1
+    tables = get_lists(db)
+    print(sep.join(table.capitalize() for table in tables))
+    return 0
 
 
 def setup_config(db):
@@ -640,6 +657,86 @@ def login(db, username, password, expires_in, register):
         return 0
     print('Invalid username or password.')
     return 1
+
+
+def search(db, query):
+    '''
+    Searches through tasks.
+
+    :param db: The database connection
+    :type db: sqlite3.Connection
+    :param query: The query string
+    :type query: list[str]
+    '''
+    def add_date_defaults(date):
+        date = dict(date.items())
+        if 'month' not in date:
+            date['month'] = '01'
+        if 'day' not in date:
+            date['day'] = '01'
+        if 'hour' not in date:
+            date['hour'] = '00'
+        if 'minute' not in date:
+            date['minute'] = '00'
+        if 'second' not in date:
+            date['second'] = '00'
+        date.pop('micro', None)
+        date.pop('tz', None)
+        return date
+
+    query = ' '.join(query)
+    filters = ['(`encrypted`=0)']
+    fields = ('id', 'task', 'date', 'done')
+
+    if query.startswith('+'):
+        filters.append('(`done`=1)')
+        query = query[1:]
+    elif query.startswith('-'):
+        filters.append('(`done`=0)')
+        query = query[1:]
+
+    if m := fromdate_re.search(query):
+        fromdate = datetime(**add_date_defaults(m.groupdict())).isoformat()
+        query = fromdate_re.sub('', query)
+        if m := todate_re.search(query):
+            todate = datetime(**add_date_defaults(m.groupdict())).isoformat()
+            query = todate_re.sub('', query)
+        else:
+            todate = 'now'
+        filters.append(
+            "(`date` BETWEEN date('%s') AND date('%s'))" % (fromdate, todate)
+        )
+
+    for match in fullexpr_re.finditer(query):
+        expr = match.groupdict()['expr']
+        if expr.strip():
+            filters.append(f'(`task` LIKE "%{expr}%")')
+    else:
+        query = fullexpr_re.sub('', query).strip()
+
+    filters.extend(
+        [f'(`task` LIKE "%{keyword}%")' for keyword in query.split(' ')]
+    )
+
+    c = db.cursor()
+    results = {}
+    for table in get_lists(db):
+        sql_statement = 'SELECT {} FROM `{}` WHERE {}'.format(
+            ', '.join(fields), table, ' AND '.join(filters),
+        )
+        c.execute(sql_statement)
+        results[table] = [dict(zip(fields, row)) for row in c]
+
+    for table, results in results.items():
+        for result in results:
+            donestr = 'x' if int(result['done']) else ' '
+            print("{table} : [{donestr}]#{id} - {task} @{date}".format(
+                table=table.capitalize(),
+                donestr=donestr,
+                **result
+                )
+            )
+    return 0
 
 
 def main():
@@ -881,6 +978,19 @@ def main():
         )
     )
     login_parser.set_defaults(callback=login)
+
+    search_parser = subparsers.add_parser(
+        'search', aliases=['s', 'sch'],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help=(
+            'Searches for tasks. Use the from:<iso8601 date>, to:<iso date>'
+            ' "expression" and keywords to filter the search. Start the query'
+            ' with + or - to filter tasks by "done" or "not done" status.'
+            ' Encrypted tasks will not be searched through.'
+        )
+    )
+    search_parser.add_argument('query', nargs='+', type=str)
+    search_parser.set_defaults(callback=search)
 
     args = vars(parser.parse_args())
     callback = args.pop('callback')
