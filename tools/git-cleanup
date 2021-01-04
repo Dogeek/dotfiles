@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import pathlib
+import shutil
+import contextlib
+
+
+class GitIgnoreLine:
+    def __init__(self, line):
+        self.line = line
+
+    def remove(self):
+        for filepath in cwd.glob(self.line):
+            with contextlib.suppress(Exception):
+                if filepath.is_dir():
+                    shutil.rmtree(filepath)
+                else:
+                    os.remove(filepath)
+
+
+cwd = pathlib.Path(os.getcwd())
+
+with cwd.joinpath('.gitignore').open() as fp:
+    for line in fp:
+        line = line.split('#')[0]
+        line = line.strip('\n')
+        line = line.strip()
+        if line.startswith('/'):
+            line = '*' + line
+
+        if line:
+            if not list(cwd.glob(line)):
+                # skip if there's no matching files
+                continue
+
+            if '-f' in sys.argv:
+                c = ''
+            else:
+                c = input(
+                    f'Files matching {line} will be removed. Continue? (Y/n) '
+                )
+            if c.lower() in ('', 'y'):
+                gil = GitIgnoreLine(line)
+                gil.remove()

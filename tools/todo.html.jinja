@@ -101,6 +101,76 @@
 
             /* Change the background color of the dropdown button when the dropdown content is shown */
             .dropdown:hover .dropbtn {background-color: #ccc;}
+
+            /*Search box styling rules*/
+            .search-container * {
+                box-sizing: border-box;
+            }
+            .search-container {
+                position: absolute;
+                left: 50%;
+                top: 50%;
+                transform: translate(-50%);
+            }
+            .search-box input[type="text"] {
+                border: none;
+                background: none;
+                z-index: 1;
+                width: 25px;
+                height: 25px;
+                transition: all 0.25s ease-in 0.25s;
+                color: transparent;
+                font-size: 0.75rem;
+                line-height: 25px;
+            }
+            .search-box input[type="text"]:hover {
+                cursor: pointer;
+            }
+            .search-box input[type="text"]:hover:focus {
+                cursor: text;
+            }
+            .search-box input[type="text"]:hover + span {
+                background: rgba(255, 255, 255, 0.2);
+            }
+            .search-box input[type="text"]:focus {
+                width: 200px;
+                padding: 0 10px;
+                outline: none;
+                color: black;
+                background: none;
+                color: white;
+            }
+            .search-box input[type="text"]:focus + span {
+                width: 200px;
+            }
+            .search-box input[type="text"]:focus + span::before {
+                width: 2px;
+                opacity: 0;
+                transition: all 0.25s ease-in;
+            }
+            .search-box input[type="text"] + span {
+                z-index: -1;
+                position: absolute;
+                border: 2px solid white;
+                top: 0;
+                width: 25px;
+                height: 25px;
+                transition: all 0.25s ease-in 0.25s;
+                border-radius: 25px;
+                left: 0;
+            }
+            .search-box input[type="text"] + span::before {
+                transition: all 0.25s ease-in 0.5s;
+                transform-origin: left top;
+                content: '';
+                position: absolute;
+                width: 10px;
+                height: 5px;
+                border-radius: 5px;
+                background: white;
+                transform: rotate(45deg) translate(26px, -2px);
+            }
+
         </style>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
         <script src="https://kit.fontawesome.com/078b4e2312.js" crossorigin="anonymous"></script>
@@ -124,6 +194,35 @@
 
             function onPageLoad(event) {
                 onTabClick(event, 'tab-default');
+                let search = document.getElementByClassName('search-input');
+                search.addEventListener('change', (event) => {
+                    const result = document.getElementById('search-result');
+                    onTabClick(event, 'search-result');
+                    let value = event.target.value;
+                    let xhr = new XMLHTTPRequest();
+                    xhr.open('get', '/search?query=' + encodeURIComponent(value), true);
+                    xhr.onreadystatechange = function() [
+                        let response = xhr.response;
+                        const output = document.getElementByClassName('search-result-content');
+                        output.innerHTML = '';
+                        for (const [listname, results] of Object.entries(response)) {
+                            let title = document.createElement('h2');
+                            title.innerText = listname;
+                            output.appendChild(title);
+                            let list = document.createElement('ul');
+                            for (res of results) {
+                                let liElement = document.createElement('li');
+                                if (res.done.toInt()) {
+                                    liElement.innerHTML = '<div class="task-done"><input type="checkbox" name="task-${res.id}" checked><label for="task-${res.id}"> #${res.id} @ ${res.date} : ${res.task}</label></div>';
+                                }
+                                else {
+                                    liElement.innerHTML = '<div><input type="checkbox" name="task-${res.id}"><label for="task-${res.id}"> #${res.id} @ ${res.date} : ${res.task}</label></div>';
+                                }
+                                list.appendChild(liElement);
+                            }
+                        }
+                    ]
+                });
             }
 
             function onTabClick(event, tabName) {
@@ -166,7 +265,6 @@
         </script>
 
         <header>
-            <h2>TO DO Lists</h2>
             <div class='navbar'>
                 <div class="dropdown">
                     <button class='dropbtn'><i class="fas fa-check-square"> TODO Lists</i></button>
@@ -197,6 +295,12 @@
                     </div>
                 </div>
                 <button onclick="toggleHideDone(event)" id="btnHideDone"><i class='fab fa-eye-slash'>Hide Done</i></button>
+                <div class="search-container">
+                    <div class="search-box">
+                        <input type="text" class="search-input"/>
+                        <span></span>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -240,6 +344,11 @@
                 </li>
                 {% endfor %}
             </ul>
+        </div>
+        <div class="tabcontent" id="search-results">
+            <h2>Search Results</h2>
+            <div class="search-result-content">
+            </div>
         </div>
     </body>
 </html>

@@ -37,6 +37,7 @@ import sqlite3
 import secrets
 import subprocess
 import sys
+from urllib.parse import parse_qs
 import webbrowser
 from wsgiref.simple_server import make_server
 
@@ -311,6 +312,19 @@ def todo_app(environ, start_response):
 
         start_response(status, headers)
         print(out.getvalue())
+        return [out.getvalue().encode('utf-8')]
+
+    if path.startswith('/search'):
+        _, qs = path.split('?')
+        query = parse_qs(qs)['query']
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            search(db, query, printjson=True)
+        status = '200 OK'
+        headers = [
+            ('Content-Type', 'application/json; charset=utf-8'),
+        ]
+        start_response(status, headers)
         return [out.getvalue().encode('utf-8')]
 
 
@@ -659,7 +673,7 @@ def login(db, username, password, expires_in, register):
     return 1
 
 
-def search(db, query):
+def search(db, query, printjson=False):
     '''
     Searches through tasks.
 
@@ -670,18 +684,20 @@ def search(db, query):
     '''
     def add_date_defaults(date):
         date = dict(date.items())
-        if 'month' not in date:
-            date['month'] = '01'
-        if 'day' not in date:
-            date['day'] = '01'
-        if 'hour' not in date:
-            date['hour'] = '00'
-        if 'minute' not in date:
-            date['minute'] = '00'
-        if 'second' not in date:
-            date['second'] = '00'
+        if date['month'] is None:
+            date['month'] = 1
+        if date['day'] is None:
+            date['day'] = 1
+        if date['hour'] is None:
+            date['hour'] = 0
+        if date['minute'] is None:
+            date['minute'] = 0
+        if date['second'] is None:
+            date['second'] = 0
         date.pop('micro', None)
         date.pop('tz', None)
+        date = {k: int(v) for k, v in date.items()}
+        print(date)
         return date
 
     query = ' '.join(query)
@@ -726,6 +742,10 @@ def search(db, query):
         )
         c.execute(sql_statement)
         results[table] = [dict(zip(fields, row)) for row in c]
+
+    if printjson:
+        print(json.dumps(results))
+        return 0
 
     for table, results in results.items():
         for result in results:
